@@ -86,6 +86,8 @@ async fn send(msg: &str, w: &mut WriteHalf<TlsStream<TcpStream>>) {
 /* ---------- 主 ---------- */
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default().unwrap();
     /* 读取配置 */
     let cfg = Settings::load();
     let hb_gap = Duration::from_millis(cfg.coinbase.heartbeat_ms.unwrap_or(5_000));
