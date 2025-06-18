@@ -56,7 +56,7 @@ static TLS_CFG: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
             .with_no_client_auth(),
     )
 });
-static SEQ_NO: AtomicI32 = AtomicI32::new(1);
+static SEQ_NO: AtomicI32 = AtomicI32::new(2);
 
 const SOH: char = '\x01'; // FIX 分隔
 
@@ -121,7 +121,10 @@ async fn main() {
     let ts = Utc::now().format("%Y%m%d-%H:%M:%S.%3f").to_string();
 
     // ❸ Coinbase 文档里要求 “timestamp + 'A' + seqNum + apiKey + passphrase” *不带* SOH
-    let raw_to_sign = format!("{}{SOH}A{SOH}1{SOH}{}{SOH}Coinbase{SOH}{}", ts, cfg.coinbase.key, cfg.coinbase.passphrase);
+    let raw_to_sign = format!(
+        "{}{SOH}A{SOH}1{SOH}{}{SOH}Coinbase{SOH}{}",
+        ts, cfg.coinbase.key, cfg.coinbase.passphrase
+    );
     let sig = sign(&cfg.coinbase.secret, &raw_to_sign);
 
     let logon = build_fix(&[
@@ -146,7 +149,7 @@ async fn main() {
 
     /* Heartbeat / TestRequest 任务 */
     {
-        let mut w = writer;                     // 把 writer 移进子任务
+        let mut w = writer; // 把 writer 移进子任务
         let key = cfg.coinbase.key.clone();
         let pend = pending.clone();
         tokio::spawn(async move {
@@ -156,12 +159,12 @@ async fn main() {
                 pend.insert(id.clone(), Utc::now().timestamp_millis());
 
                 let tr = build_fix(&[
-                    (35,"1".into()),           // TestRequest
-                    (49,key.clone()),
-                    (56,"Coinbase".into()),
-                    (34,next_seq()),
-                    (52,Utc::now().format("%Y%m%d-%H:%M:%S.%3f").to_string()),
-                    (112,id.clone()),          // TestReqID
+                    (35, "1".into()), // TestRequest
+                    (49, key.clone()),
+                    (56, "Coinbase".into()),
+                    (34, next_seq()),
+                    (52, Utc::now().format("%Y%m%d-%H:%M:%S.%3f").to_string()),
+                    (112, id.clone()), // TestReqID
                 ]);
                 send(&tr, &mut w).await;
             }
@@ -170,33 +173,34 @@ async fn main() {
 
     /* 读循环 + RTT 统计 */
     let mut reader = BufReader::new(reader);
-    let mut head = Vec::<u8>::with_capacity(64);
-    let mut lenbuf = Vec::<u8>::with_capacity(32);
-    let mut body = Vec::<u8>::with_capacity(8192);
+    // let mut head = Vec::<u8>::with_capacity(64);
+    // let mut lenbuf = Vec::<u8>::with_capacity(32);
+    // let mut body = Vec::<u8>::with_capacity(8192);
 
     loop {
-        head.clear();
-        if reader.read_until(b'\x01', &mut head).await.unwrap() == 0 {
-            eprintln!("连接断开"); break;
+        let mut body = Vec::<u8>::with_capacity(8192);
+        // 读取到结束
+        loop {
+            let mut buf = vec![0; 1024];
+            let n = reader.read(&mut buf).await.expect("读取失败");
+            if n == 0 {
+                break;
+            } // EOF
+            body.extend_from_slice(&buf[..n]);
+            if body.ends_with(b"\x01") {
+                break;
+            } // FIX 消息以 SOH 结束
         }
-        if !head.starts_with(b"8=FIX") { continue; }
-
-        lenbuf.clear();
-        reader.read_until(b'\x01', &mut lenbuf).await.unwrap();
-        let len: usize = std::str::from_utf8(&lenbuf[2..lenbuf.len()-1]).unwrap().parse().unwrap();
-
-        body.resize(len + 7, 0);   // (含 10=xxx<SOH>)
-        reader.read_exact(&mut body).await.unwrap();
+        // println!("接收到的数据：{:?}", body);
         let msg = String::from_utf8_lossy(&body);
-
+        println!("接收到的消息：{}", msg);
         /* 只关心 Heartbeat 回包 */
-        if msg.starts_with("35=0") {
-            if let Some(pos) = msg.find("112=") {
-                let id = &msg[pos+4..].split('\x01').next().unwrap();
-                if let Some((_, t0)) = pending.remove(*id) {          // ❺ 和 Heartbeat 共享
-                    let rtt = Utc::now().timestamp_millis() - t0;
-                    println!("RTT = {rtt} ms (id={id})");
-                }
+        if let Some(pos) = msg.find("112=") {
+            let id = &msg[pos + 4..].split('\x01').next().unwrap();
+            if let Some((_, t0)) = pending.remove(*id) {
+                // ❺ 和 Heartbeat 共享
+                let rtt = Utc::now().timestamp_millis() - t0;
+                println!("RTT = {rtt} ms (id={id})");
             }
         }
     }
