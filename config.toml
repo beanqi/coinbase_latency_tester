@@ -1,0 +1,9 @@
+[coinbase]
+key         = "YOUR_API_KEY"
+secret      = "YOUR_API_SECRET_BASE64"
+passphrase  = "YOUR_API_PASSPHRASE"
+
+# 可选项：不填则用默认值
+heartbeat_ms = 5000                       # ping 周期（毫秒）
+order_host   = "fix-ord.exchange.coinbase.com"
+port         = 6121
