@@ -1,29 +1,34 @@
 // Cargo.toml 额外依赖
 // dashmap = "5"
-// once_cell = "1"      （如果你喜欢换掉 lazy_static） 
+// once_cell = "1"      （如果你喜欢换掉 lazy_static）
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
+use dashmap::DashMap;
 use hmac::{Hmac, Mac};
 use rustls::{pki_types::ServerName, version::TLS12, ClientConfig, RootCertStore};
-use sha2::Sha256;
 use serde::Deserialize;
+use sha2::Sha256;
 use std::{
-    sync::{atomic::{AtomicI32, Ordering}, Arc, LazyLock},
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Arc, LazyLock,
+    },
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, split, WriteHalf},
+    io::{split, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf},
     net::TcpStream,
     time::sleep,
 };
 use tokio_rustls::{client::TlsStream, TlsConnector};
-use uuid::Uuid;
-use dashmap::DashMap;                   // ❷ 并发 HashMap
+use uuid::Uuid; // ❷ 并发 HashMap
 
 /* ---------- 配置 ---------- */
 #[derive(Debug, Deserialize)]
-struct Settings { coinbase: CoinbaseCfg }
+struct Settings {
+    coinbase: CoinbaseCfg,
+}
 
 #[derive(Debug, Deserialize)]
 struct CoinbaseCfg {
@@ -31,8 +36,8 @@ struct CoinbaseCfg {
     secret: String,
     passphrase: String,
     heartbeat_ms: Option<u64>,
-    order_host:   Option<String>,
-    port:         Option<u16>,
+    order_host: Option<String>,
+    port: Option<u16>,
 }
 impl Settings {
     fn load() -> Self {
@@ -53,11 +58,13 @@ static TLS_CFG: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
 });
 static SEQ_NO: AtomicI32 = AtomicI32::new(1);
 
-const SOH: char = '\x01';               // FIX 分隔
+const SOH: char = '\x01'; // FIX 分隔
 
 /* ---------- 工具 ---------- */
 fn sign(secret_b64: &str, msg: &str) -> String {
-    let key = general_purpose::STANDARD.decode(secret_b64).expect("secret 不是合法 base64");
+    let key = general_purpose::STANDARD
+        .decode(secret_b64)
+        .expect("secret 不是合法 base64");
     let mut mac: Hmac<Sha256> = Hmac::new_from_slice(&key).unwrap();
     mac.update(msg.as_bytes());
     general_purpose::STANDARD.encode(mac.finalize().into_bytes())
@@ -66,7 +73,9 @@ fn sign(secret_b64: &str, msg: &str) -> String {
 fn build_fix(fields: &[(i32, String)]) -> String {
     // 计算 BodyLength(9) 时，不包含 8= 头和 9= 本身，但包含 SOH
     let mut body = String::new();
-    for (tag, val) in fields { body.push_str(&format!("{tag}={val}{SOH}")); }
+    for (tag, val) in fields {
+        body.push_str(&format!("{tag}={val}{SOH}"));
+    }
     let len = body.len();
     let mut msg = format!("8=FIXT.1.1{SOH}9={len}{SOH}{body}");
     let cksum: u32 = msg.bytes().map(|b| b as u32).sum();
@@ -87,16 +96,22 @@ async fn send(msg: &str, w: &mut WriteHalf<TlsStream<TcpStream>>) {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     rustls::crypto::ring::default_provider()
-        .install_default().unwrap();
+        .install_default()
+        .unwrap();
     /* 读取配置 */
     let cfg = Settings::load();
     let hb_gap = Duration::from_millis(cfg.coinbase.heartbeat_ms.unwrap_or(5_000));
-    let host   = cfg.coinbase.order_host.clone()
-                              .unwrap_or_else(|| "fix-ord.exchange.coinbase.com".into());
-    let port   = cfg.coinbase.port.unwrap_or(6121);
+    let host = cfg
+        .coinbase
+        .order_host
+        .clone()
+        .unwrap_or_else(|| "fix-ord.exchange.coinbase.com".into());
+    let port = cfg.coinbase.port.unwrap_or(6121);
 
     /* TCP + TLS */
-    let stream = TcpStream::connect((host.as_str(), port)).await.expect("TCP 连接失败");
+    let stream = TcpStream::connect((host.as_str(), port))
+        .await
+        .expect("TCP 连接失败");
     let connector = TlsConnector::from(TLS_CFG.clone());
     let domain = ServerName::try_from(host.clone()).unwrap();
     let tls = connector.connect(domain, stream).await.expect("TLS 失败");
@@ -106,7 +121,7 @@ async fn main() {
     let ts = Utc::now().format("%Y%m%d-%H:%M:%S.%3f").to_string();
 
     // ❸ Coinbase 文档里要求 “timestamp + 'A' + seqNum + apiKey + passphrase” *不带* SOH
-    let raw_to_sign = format!("{ts}A1{}{}", cfg.coinbase.key, cfg.coinbase.passphrase);
+    let raw_to_sign = format!("{}{SOH}A{SOH}1{SOH}{}{SOH}Coinbase{SOH}{}", ts, cfg.coinbase.key, cfg.coinbase.passphrase);
     let sig = sign(&cfg.coinbase.secret, &raw_to_sign);
 
     let logon = build_fix(&[
@@ -115,14 +130,14 @@ async fn main() {
         (56, "Coinbase".into()),
         (34, "1".into()),
         (52, ts),
-        (98, "0".into()),               // 加密 0=无
-        (108, "30".into()),             // HeartBtInt
-        (141, "Y".into()),              // 重传标志
+        (98, "0".into()),   // 加密 0=无
+        (108, "30".into()), // HeartBtInt
+        (141, "Y".into()),  // 重传标志
         (553, cfg.coinbase.key.clone()),
         (554, cfg.coinbase.passphrase.clone()),
         (95, sig.len().to_string()),
         (96, sig),
-        (1137,"9".into()),              // 发送扩展字段
+        (1137, "9".into()), // 发送扩展字段
     ]);
     send(&logon, &mut writer).await;
 
@@ -155,9 +170,9 @@ async fn main() {
 
     /* 读循环 + RTT 统计 */
     let mut reader = BufReader::new(reader);
-    let mut head   = Vec::<u8>::with_capacity(64);
+    let mut head = Vec::<u8>::with_capacity(64);
     let mut lenbuf = Vec::<u8>::with_capacity(32);
-    let mut body   = Vec::<u8>::with_capacity(8192);
+    let mut body = Vec::<u8>::with_capacity(8192);
 
     loop {
         head.clear();
